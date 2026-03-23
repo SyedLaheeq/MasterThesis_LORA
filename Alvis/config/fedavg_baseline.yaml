@@ -1,0 +1,26 @@
+training_config:
+  project_name: "rolora_sparse_comparison"
+  model_name: "ThreeLayerFC"
+  dataset_name: "MNIST"
+  aggregate_type: "fedavg"          # This triggers FedAvgServer
+  num_clients: 50
+  fraction_malicious: 0.2           # Same 20% noise as your RoLoRA run
+  total_epochs: 50
+  q_factor: 0.8
+  evaluate_each_epoch: 1
+  device: "cpu"                     # Matches your --num-gpus 0 command
+  
+  attack_args:
+    attack_type: "flip_labels"      # Keep the attack identical
+    attack_epoch: 1
+    max_label: 9
+    
+  defence_args:
+    defence_type: "no_defence"      # FedAvg has no built-in Byzantine defense
+    
+  batch_size: 64
+  local_epochs: 1
+  malicious_type: "group_oriented"
+  
+  fedavg_params:                    # Specific block for FedAvgServer
+    alpha: 0.01                     # Global learning rate

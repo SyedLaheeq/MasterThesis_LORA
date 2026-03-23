@@ -1,0 +1,61 @@
+training_config:
+  project_name: federated_learning_project
+  model_name: DeeperCIFARCNN
+  aggregate_type: sparse
+  dataset_name: CIFAR10
+  num_clients: 200
+  fraction_malicious: 0.4
+  total_epochs: 200
+  q_factor: 0.8
+  evaluate_each_epoch: 1
+  attack_args:
+    attack_type: flip_labels
+    attack_epoch: 5
+    max_label: 9
+  defence_args:
+    defence_type: no_defence
+  batch_size: 64
+  local_epochs: 3
+  malicious_type: group_oriented
+  sparse_params:
+    alpha: 0.01
+    beta: 0.0001
+    is_ftotal: true
+    lambda_val:
+    - 0
+    - 0.0025
+    - 100
+    c_alpha: 0.001
+    rho_alpha: 0.5
+    max_line_search_iterations_alpha: 0
+    c_beta: 0.001
+    rho_beta: 0.5
+    max_line_search_iterations_beta: 0
+  fedavg_params:
+    alpha: 0.01
+sweep_config:
+  method: bayes
+  metric:
+    name: test_accuracy
+    goal: maximize
+  parameters:
+    sparse_params.alpha:
+      values:
+      - 0.025
+      - 0.01
+      - 0.006
+      - 0.0015
+    sparse_params.beta:
+      values:
+      - 0.0008
+      - 0.0006
+      - 0.0004
+      - 0.0002
+    sparse_params.lambda_val:
+      values:
+      - - 0
+        - 0.004
+        - 100
+      - - 0
+        - 0.003
+        - 100

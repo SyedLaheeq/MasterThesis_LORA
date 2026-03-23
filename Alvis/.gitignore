@@ -1,0 +1,28 @@
+# --- System & VS Code Files ---
+.vscode-server/
+.vscode/
+.ssh/
+.nv/
+.dotnet/
+.cache/
+.copilot/
+.xsession
+.wget-hsts
+
+# --- Shell / Bash Config (Hidden files) ---
+.bash_history
+.bash_logout
+.bash_profile
+.bashrc
+.zshrc
+
+# --- Python & ML Specific ---
+__pycache__/
+*.py[cod]
+*$py.class
+wandb/
+logs/
+
+# --- Environment & OS ---
+.env
+.DS_Store

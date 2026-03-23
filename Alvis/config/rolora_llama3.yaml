@@ -1,0 +1,29 @@
+training_config:
+  project_name: "RoLoRA_Llama3_Thesis"
+  model_name: "Llama-3-8B"
+  dataset_name: "alpaca"     # Or whatever text dataset you have prepared
+  aggregate_type: "sparse"   # This keeps your Iteration 2 FedLAW defense active
+  num_clients: 6           # Keep this low for Llama-3 to avoid OOM
+  fraction_malicious: 0.2
+  total_epochs: 5 # CHANGE BACK TO 5
+  evaluate_each_epoch: 1
+  device: "cuda"
+  batch_size: 1              # Llama-3 8B is heavy; start with 1 and increase if VRAM allows
+  local_epochs: 1
+  
+  # Iteration 4: RoLoRA Specifics
+  rolora_params:
+    rank: 16                 # The rank for the LoRA adapters
+    scaling: 0.01            # Alpha/Scaling factor for the rotated spac
+    
+  # Iteration 2: FedLAW Sparse Parameters
+  sparse_params:
+    alpha: 0.0001
+    beta: 0.01
+    is_ftotal: true
+    # Add this block to your config
+# Add this to your YAML file
+  attack_args:
+    attack_type: inverse_gradient
+    attack_epoch: 0
+    scale: 1.0

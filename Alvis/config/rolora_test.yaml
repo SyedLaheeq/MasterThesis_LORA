@@ -1,0 +1,32 @@
+training_config:
+  project_name: "rolora_sparse_comparison"
+  model_name: "ThreeLayerFC"       # Matches your MNIST model
+  dataset_name: "MNIST"
+  aggregate_type: "sparse"         # Uses your FedLAW implementation
+  num_clients: 50
+  fraction_malicious: 0.2          # 20% malicious clients
+  total_epochs: 50
+  q_factor: 0.8
+  evaluate_each_epoch: 1
+  attack_args:
+    attack_type: "flip_labels"     # Standard attack for testing
+    attack_epoch: 1
+    max_label: 9
+  defence_args:
+    defence_type: "no_defence"     # Test RoLoRA stability alone first
+  batch_size: 64
+  local_epochs: 1                  # Important for RoLoRA alternating logic
+  malicious_type: "group_oriented"
+  sparse_params:                   # Values from your default_config
+    alpha: 0.01
+    beta: 0.0001
+    is_ftotal: true
+    k_value: [0, null, null, null, null]
+    c_alpha: 0.0001
+    rho_alpha: 0.5
+    max_line_search_iterations_alpha: 0
+    c_beta: 0.01
+    rho_beta: 0.5
+    max_line_search_iterations_beta: 10
+    estimate_initial_updates: false
+    normalize_gradients: false
