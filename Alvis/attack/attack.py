@@ -132,17 +132,19 @@ class Attack:
 
         attacked = []
 
-        for g in grads:
-            new_g = {}
+        for g, client in zip(grads, clients):
 
-            for k in g:
-                new_g[k] = -scale * g[k]
+            # ONLY attack malicious clients
+            if client.malicious:
+                new_g = {}
+                for k in g:
+                    new_g[k] = -scale * g[k]
 
-                # amplify small gradients
-                if torch.norm(new_g[k]) < 1e-3:
-                    new_g[k] = new_g[k] * 100
-
-            attacked.append(new_g)
+                    if torch.norm(new_g[k]) < 1e-3:
+                        new_g[k] = new_g[k] * 10  # reduce explosion
+                attacked.append(new_g)
+            else:
+                attacked.append(g)
 
         return attacked
     

@@ -35,8 +35,8 @@ class BaseServer:
         attack_args=None,
         defence_args=None,
         total_epochs=5,
-        q_factor=0.1,
-        model=DeeperCIFARCNN(),
+        q_factor=1.0,  # safer default
+        model=None,
         evaluate_each_epoch=2,
         local_epochs=1,
         batch_size=64,
@@ -74,39 +74,30 @@ class BaseServer:
 
         # Models
         # Set device dynamically
-        if (device == "gpu" or device == "cuda") and torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            self.device = torch.device("cpu")
-            print("WARNING: Using CPU for computation!")
+        if model is None:
+            model = DeeperCIFARCNN()
+        
+        self.device = torch.device("cuda" if device in ["cuda", "gpu"] and torch.cuda.is_available() else "cpu")
         self.global_model = model.to(self.device)
-        self.num_clients = 0
-        self.test_dataset = None
-        self.fraction_malicious = fraction_malicious
 
-        # Training configuration
+        self.q_factor = q_factor
+        print(f"[INFO] q_factor = {q_factor}")
+
+        self.num_clients = num_clients
+        self.fraction_malicious = fraction_malicious
         self.total_epochs = total_epochs
         self.local_epochs = local_epochs
         self.evaluate_each_epoch = evaluate_each_epoch
-        
-        # Defense and Attack
-        self.defence_args = defence_args
-        if self.defence_args is None:
-            self.defence_args = {"defence_type": "no_defence"}
+
+        self.defence_args = defence_args or {"defence_type": "no_defence"}
         self.defence_func = Defence(defence_args=self.defence_args)
 
         self.attack_args = attack_args
-        self.attack_func = None
-        if attack_args is not None:
-            self.attack_type = attack_args.get('attack_type', None)
-            self.attack_epoch = attack_args.get('attack_epoch', -1)
-            self.attack_func = Attack(attack_args=attack_args)
+        self.attack_func = Attack(attack_args=attack_args) if attack_args else None
 
         self.multi_attack_args = multi_attack_args
         self.normalize_params = normalize_params
 
-        # Initialize clients
         self.clients = self._initialize_clients(
             dataset_name=dataset_name,
             num_clients=num_clients,
@@ -117,8 +108,8 @@ class BaseServer:
             batch_size=batch_size,
             malicious_type=malicious_type
         )
-
-        # For Sparse FL line-search
+        print("[DEBUG] Client malicious flags:", [c.malicious for c in self.clients])
+            # For Sparse FL line-search
         self.list_m_next = []
         self.list_w_next = []
 
@@ -276,60 +267,80 @@ class BaseServer:
         elif dataset_name == "alpaca":
             from datasets import load_dataset
             from transformers import AutoTokenizer
+            import torch
 
-            # 1. Load the Tokenizer
-            # Use the same model name as in your main script
             tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
             tokenizer.pad_token = tokenizer.eos_token
 
-            # 2. Load the Raw Alpaca Dataset
             raw_dataset = load_dataset("tatsu-lab/alpaca", split='train')
-            
 
-            # 3. Define Tokenization & Prompting
+            # -------------------------------
+            # Tokenization
+            # -------------------------------
             def tokenize_function(examples):
-                # Standard Alpaca Prompt Template
                 texts = []
                 for i, inp, out in zip(examples['instruction'], examples['input'], examples['output']):
                     if inp.strip():
                         texts.append(f"### Instruction:\n{i}\n\n### Input:\n{inp}\n\n### Response:\n{out}")
                     else:
                         texts.append(f"### Instruction:\n{i}\n\n### Response:\n{out}")
-                
+
                 return tokenizer(
-                    texts, 
-                    truncation=True, 
-                    padding="max_length", 
-                    max_length=128 # CHANGE TO 512 FRO NORNAL RUM
+                    texts,
+                    truncation=True,
+                    padding="max_length",
+                    max_length=128
                 )
 
-            # 4. Map the dataset and set to PyTorch format
-            print("[INFO] Tokenizing Alpaca dataset... (this may take a minute)")
+            print("[INFO] Tokenizing Alpaca dataset...")
             tokenized_dataset = raw_dataset.map(
-                tokenize_function, 
-                batched=True, 
+                tokenize_function,
+                batched=True,
                 remove_columns=raw_dataset.column_names
             )
+
             tokenized_dataset.set_format("torch")
 
-            # 5. Split into Train/Test (90/10)
+            # -------------------------------
+            # Train/Test Split
+            # -------------------------------
             split = tokenized_dataset.train_test_split(test_size=0.1, seed=42)
-            train_dataset = split['train']
-            test_dataset = split['test']
-            train_dataset = train_dataset.select(range(1000))
-            test_dataset = test_dataset.select(range(100))
+            train_dataset = split['train'].select(range(1000))
+            test_dataset = split['test'].select(range(100))
 
-            # 6. CRITICAL COMPATIBILITY FIX:
-            # Your server uses .targets to split data among clients.
-            # We assign random integers [0-9] so the distribution logic works.
-            train_dataset.targets = torch.randint(0, 4, (len(train_dataset),))
-            test_dataset.targets = torch.randint(0, 4, (len(test_dataset),))
+            # -------------------------------
+            # Semantic Targets (FIXED)
+            # -------------------------------
+            def build_semantic_targets(dataset, num_groups):
+                targets = []
+
+                for example in dataset:
+                    input_ids = torch.tensor(example["input_ids"])
+                    length = (input_ids != 0).sum().item()
+
+                    # length-based grouping
+                    if length < 40:
+                        group = 0
+                    elif length < 80:
+                        group = 1
+                    elif length < 120:
+                        group = 2
+                    else:
+                        group = 3
+
+                    targets.append(group)
+
+                return torch.tensor(targets)
+
+            num_groups = min(4, self.num_clients)
+
+            train_dataset.targets = build_semantic_targets(train_dataset, num_groups)
+            test_dataset.targets = build_semantic_targets(test_dataset, num_groups)
 
             print(f"[SUCCESS] Loaded Alpaca: {len(train_dataset)} train, {len(test_dataset)} test samples.")
             return train_dataset, test_dataset
         else:
             raise ValueError(f"Unknown dataset name: {dataset_name}")
-        return train_dataset, test_dataset
 
     def _split(self, arr, n):
         """
@@ -339,74 +350,130 @@ class BaseServer:
         return (arr[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n))
     
     def _flatten_single_gradient(self, grad_dict):
-        return torch.cat([v.view(-1) for v in grad_dict.values()])
+
+        if grad_dict is None or len(grad_dict) == 0:
+            return None
+
+        flat = []
+
+        for k in sorted(grad_dict.keys()):  # 🔥 SORT = CONSISTENT ORDER
+            g = grad_dict[k]
+
+            if g is None:
+                continue
+
+            flat.append(g.view(-1))
+
+        if len(flat) == 0:
+            return None
+
+        return torch.cat(flat)
 
     def _distribute_dataset(self, train_dataset, num_label, q_factor, batch_size):
-        """
-        Distributes the dataset among clients in a partially overlapping manner 
-        controlled by q_factor. 
-        """
-        # if self.num_clients < num_label:
-        #     raise ValueError("Number of clients must be >= number of classes.")
+        import numpy as np
+        import torch
+        import random
+
         num_label = min(num_label, self.num_clients)
+
+        # ==========================================================
+        # ✅ TRUE IID MODE
+        # ==========================================================
+        if q_factor >= 0.99:
+            indices = np.random.permutation(len(train_dataset))
+            splits = np.array_split(indices, self.num_clients)
+
+            client_loaders = []
+            for i in range(self.num_clients):
+                subset = torch.utils.data.Subset(train_dataset, splits[i])
+                loader = torch.utils.data.DataLoader(subset, batch_size=batch_size, shuffle=True)
+                client_loaders.append(loader)
+
+            print("[INFO] Using IID data distribution")
+            return client_loaders, [0] * self.num_clients
+
+        # ==========================================================
+        # NON-IID MODE
+        # ==========================================================
+        targets = np.array(train_dataset.targets)
 
         label2idx = {}
         for i in range(num_label):
-            label2idx[str(i)] = np.where(train_dataset.targets == i)[0]
-
-        # Each label i is also one group i
+            label2idx[i] = np.where(targets == i)[0]
+        # Assign clients to groups
         group2client_idx = []
         for i in range(num_label):
             group2client_idx.extend([i] * (self.num_clients // num_label))
 
         remainder = self.num_clients - len(group2client_idx)
         if remainder > 0:
-            # Random assignment of leftover clients
             extra_groups = list(np.random.permutation(num_label)[:remainder])
             group2client_idx.extend(extra_groups)
 
         random.shuffle(group2client_idx)
 
-        # Build group -> data index
+        # Build group → data mapping
         group2data_idx = [[] for _ in range(num_label)]
+
         for i in range(num_label):
-            perm_idx = np.random.permutation(len(label2idx[str(i)]))
+            perm_idx = np.random.permutation(len(label2idx[i]))
             split_point = int(len(perm_idx) * q_factor)
-            # Indices for the group i
+
             q_group_idx = perm_idx[:split_point]
             q_complement_idx = perm_idx[split_point:]
 
-            group2data_idx[i].extend(label2idx[str(i)][q_group_idx.tolist()])
+            group2data_idx[i].extend(label2idx[i][q_group_idx.tolist()])
 
-            # Distribute complement among other groups
             if len(q_complement_idx) > 0:
-                splitted_complement = list(self._split(q_complement_idx, num_label - 1))
+                splitted = np.array_split(q_complement_idx, num_label - 1)
                 c_idx = 0
                 for j in range(num_label):
                     if j != i:
-                        group2data_idx[j].extend(label2idx[str(i)][splitted_complement[c_idx].tolist()])
+                        group2data_idx[j].extend(label2idx[i][splitted[c_idx].tolist()])
                         c_idx += 1
 
-        # Shuffle each group
+        # Shuffle
         for sublist in group2data_idx:
             random.shuffle(sublist)
 
-        # Each group has some subset of data. Now map group -> clients
+        # Map to clients
         client2data_idx = {}
+
         for i in range(num_label):
             client_indices = np.where(np.array(group2client_idx) == i)[0]
             data_indices = group2data_idx[i]
-            splitted_data = list(self._split(data_indices, len(client_indices)))
-            for j, c in enumerate(client_indices):
-                client2data_idx[c] = splitted_data[j]
 
+            splitted_data = np.array_split(data_indices, len(client_indices))
+
+            for j, c in enumerate(client_indices):
+                client2data_idx[c] = list(splitted_data[j])
+
+        # ==========================================================
+        # ✅ BALANCE CLIENT DATA (VERY IMPORTANT)
+        # ==========================================================
+        min_size = min(len(v) for v in client2data_idx.values())
+
+        for k in client2data_idx:
+            client2data_idx[k] = client2data_idx[k][:min_size]
+
+        # ==========================================================
+        # CREATE LOADERS
+        # ==========================================================
         client_loaders = []
+
         for i in range(self.num_clients):
             subset_indices = client2data_idx[i]
             subset_ds = torch.utils.data.Subset(train_dataset, subset_indices)
-            loader = torch.utils.data.DataLoader(subset_ds, batch_size=batch_size, shuffle=True)
+
+            loader = torch.utils.data.DataLoader(
+                subset_ds,
+                batch_size=batch_size,
+                shuffle=True
+            )
+
             client_loaders.append(loader)
 
+        print(f"[INFO] Using non-IID distribution | q_factor={q_factor}")
         return client_loaders, group2client_idx
 
     def _flatten_tensors(self, input_list):
@@ -459,14 +526,14 @@ class BaseServer:
         return_params=False
     ):
         """
-        Gathers updates and applies attack + robust defence (mask-based, no client removal).
+        Gathers updates and applies attack + debug similarity check.
         """
 
         client_gradients = []
         client_losses = []
 
         # ==========================================================
-        # ✅ STEP 1: COLLECT ALL CLIENT UPDATES
+        # STEP 1: COLLECT ALL CLIENT UPDATES
         # ==========================================================
         for client in self.clients:
             print(f"[Server] Processing Client {client.client_id}", flush=True)
@@ -485,7 +552,7 @@ class BaseServer:
             client_losses.append(avg_loss)
 
         # ==========================================================
-        # ✅ STEP 2: REMOVE NaN / INF CLIENTS (HARD FILTER)
+        # STEP 2: REMOVE NaN / INF CLIENTS
         # ==========================================================
         clean_gradients = []
         clean_losses = []
@@ -499,6 +566,10 @@ class BaseServer:
 
             g_flat = self._flatten_single_gradient(g)
 
+            if g_flat is None:
+                print(f"[INFO] Skipping client {i} due to empty gradients")
+                continue
+
             if torch.isnan(g_flat).any() or torch.isinf(g_flat).any():
                 print(f"[Defence] 🚨 Dropping Client {i} (NaN gradient)")
                 continue
@@ -507,24 +578,64 @@ class BaseServer:
             clean_losses.append(loss)
             clean_ids.append(i)
 
+        if len(clean_gradients) == 0:
+            raise RuntimeError("All clients dropped due to NaNs!")
+
+        # replace originals
         client_gradients = clean_gradients
         client_losses = clean_losses
 
-        if len(client_gradients) == 0:
-            raise RuntimeError("All clients dropped due to NaNs!")
-
         # ==========================================================
-        # ✅ STEP 3: APPLY ATTACK (ONCE)
+        # STEP 3: APPLY ATTACK (CORRECT CLIENT ALIGNMENT)
         # ==========================================================
         if self.attack_func is not None:
+            clean_clients = [self.clients[i] for i in clean_ids]
+
             client_gradients = self.attack_func(
                 client_gradients,
-                self.clients,
+                clean_clients,
                 scale=self.attack_args.get("scale", 1.0)
             )
-        weights_mask = torch.ones(len(client_gradients))
-        return client_gradients, client_losses, weights_mask
 
+        weights_mask = torch.ones(len(client_gradients))
+
+        # ==========================================================
+        # STEP 4: GRADIENT SIMILARITY DEBUG (FIXED)
+        # ==========================================================
+        grads_flat = []
+
+        for i, g in enumerate(client_gradients):
+            g_flat = self._flatten_single_gradient(g)
+
+            if g_flat is None:
+                print(f"[SIM DEBUG] Skipping client {i} (empty)")
+                continue
+
+            grads_flat.append(g_flat)
+
+        # normalize safely
+        grads_flat = [
+            g / (torch.norm(g) + 1e-8)
+            for g in grads_flat
+        ]
+        print("\n[SIMILARITY DEBUG]")
+        for i in range(len(grads_flat)):
+            sims = []
+            for j in range(len(grads_flat)):
+                if i != j:
+                    sim = torch.nn.functional.cosine_similarity(
+                        grads_flat[i],
+                        grads_flat[j],
+                        dim=0
+                    )
+                    sims.append(sim.item())
+
+            avg_sim = sum(sims) / len(sims)
+            print(f"[SIM] Client {i} avg similarity: {avg_sim:.4f}")
+
+        print()
+        return client_gradients, client_losses, weights_mask
+    
     def calculate_accuracy(self, is_fedavg=False):
         # """
         # Evaluates the model on the test dataset.

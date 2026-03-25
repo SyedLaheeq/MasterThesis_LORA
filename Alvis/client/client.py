@@ -401,19 +401,29 @@ class Client:
         torch.cuda.empty_cache()
 
         # ==========================================================
-        # ORIGINAL MODEL HANDLING
+        # MODEL HANDLING
         # ==========================================================
         is_llm = hasattr(self.model, "config") and "llama" in str(self.model.config.model_type).lower()
 
         if is_llm:
             local_model = self.model
-            print(f"[Client {self.client_id}] Using shared LLM model", flush=True)
+            print(f"[Client {self.client_id}] Using shared base LLM + LoRA", flush=True)
         else:
             local_model = copy.deepcopy(self.model)
             print(f"[Client {self.client_id}] Using copied CNN model", flush=True)
 
         local_model = local_model.to(device)
-        local_model.load_state_dict(global_weights)
+
+        # ==========================================================
+        # LOAD ONLY LORA WEIGHTS
+        # ==========================================================
+        state_dict = local_model.state_dict()
+
+        for k in global_weights:
+            if "lora_" in k:
+                state_dict[k] = global_weights[k].to(device)
+
+        local_model.load_state_dict(state_dict, strict=False)
         local_model.train()
 
         print(f"[Client {self.client_id}] Model loaded to {device}", flush=True)
@@ -421,50 +431,35 @@ class Client:
         # ==========================================================
         # LoRA detection
         # ==========================================================
-        all_param_names = [name for name, _ in local_model.named_parameters()]
-        has_lora = any("lora_" in name for name in all_param_names)
-
+        has_lora = any("lora_" in name for name, _ in local_model.named_parameters())
         print(f"[Client {self.client_id}] RoLoRA detected: {has_lora}", flush=True)
 
         # ==========================================================
-        # ORIGINAL LoRA alternating training
+        # TRAIN ONLY LORA PARAMS
         # ==========================================================
         if has_lora:
             for name, param in local_model.named_parameters():
-
-                if "lora_A" in name:
-                    param.requires_grad = (epoch % 2 != 0)
-
-                elif "lora_B" in name:
-                    param.requires_grad = (epoch % 2 == 0)
-
+                if "lora_" in name:
+                    param.requires_grad = True
                 else:
                     param.requires_grad = False
 
-        is_under_attack = self.malicious and epoch >= self.attack_epoch
-
         trainable_params = [p for p in local_model.parameters() if p.requires_grad]
+        print(f"[Client {self.client_id}] Trainable params: {len(trainable_params)}", flush=True)
+
         optimizer = torch.optim.SGD(trainable_params, lr=lr)
 
         # ==========================================================
-        # Parameter attack
+        # 🔥 GRADIENT ACCUMULATOR (KEY FIX)
         # ==========================================================
-        if is_under_attack and self.attack_type in self.ATTACK_ON_PARAMETRS:
-            print(f"[Client {self.client_id}] Parameter attack active", flush=True)
-            random_weights = self.attack_func(global_weights=global_weights, **self.attack_args)
-            local_model.load_state_dict(random_weights)
+        grad_accumulator = {}
 
         total_loss = 0
         num_batches = 0
 
         print(f"[Client {self.client_id}] Starting local training loop", flush=True)
 
-        # ==========================================================
-        # TRAINING LOOP
-        # ==========================================================
         for local_ep in range(self.local_epoch):
-
-            print(f"[Client {self.client_id}] Local epoch {local_ep+1}/{self.local_epoch}", flush=True)
 
             for batch in self.data_loader:
 
@@ -477,10 +472,9 @@ class Client:
                 if num_batches == 0:
                     print(f"[Client {self.client_id}] First forward pass", flush=True)
 
-                # Data attack
-                if is_under_attack and self.attack_type in self.ATTACK_ON_DATA:
-                    data, target = self.attack_func(data=data, target=target, **self.attack_args)
-
+                # ======================================================
+                # FORWARD
+                # ======================================================
                 with torch.amp.autocast(device_type=device.type):
 
                     if isinstance(batch, dict):
@@ -490,25 +484,47 @@ class Client:
                         output = local_model(data)
                         loss = nn.CrossEntropyLoss()(output, target)
 
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        print(f"[Client {self.client_id}] 🚨 NaN loss detected — stopping early")
-                        break
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"[Client {self.client_id}] 🚨 NaN loss detected — stopping")
+                    break
 
                 optimizer.zero_grad()
 
+                # ======================================================
+                # BACKWARD + GRAD EXTRACTION (CRITICAL FIX)
+                # ======================================================
                 if device.type == "cuda" and scaler is not None:
 
                     scaler.scale(loss).backward()
 
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(local_model.parameters(), 1.0)
+                    scale = scaler.get_scale()
+
+                    for name, param in local_model.named_parameters():
+                        if param.requires_grad and param.grad is not None:
+
+                            grad = param.grad.detach().clone() / scale
+
+                            if name not in grad_accumulator:
+                                grad_accumulator[name] = grad
+                            else:
+                                grad_accumulator[name] += grad
 
                     scaler.step(optimizer)
                     scaler.update()
 
                 else:
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(local_model.parameters(), 1.0)
+
+                    for name, param in local_model.named_parameters():
+                        if param.requires_grad and param.grad is not None:
+
+                            grad = param.grad.detach().clone()
+
+                            if name not in grad_accumulator:
+                                grad_accumulator[name] = grad
+                            else:
+                                grad_accumulator[name] += grad
+
                     optimizer.step()
 
                 total_loss += loss.item()
@@ -524,37 +540,42 @@ class Client:
 
         print(f"[Client {self.client_id}] Training complete | avg_loss={avg_loss:.4f}", flush=True)
 
-        print(f"[Client {self.client_id}] Collecting parameter updates", flush=True)
-
         # ==========================================================
-        # ORIGINAL PARAM UPDATE (WORKING VERSION)
+        # ✅ RETURN REAL GRADIENTS (FINAL FIX)
         # ==========================================================
-        state_dict = {k: v.detach().cpu() for k, v in local_model.state_dict().items()}
-        trainable_keys = [name for name, p in local_model.named_parameters() if p.requires_grad]
-
-        if has_lora:
-            target_keys = [k for k in state_dict.keys() if "lora_" in k]
-        else:
-            target_keys = list(state_dict.keys())
-
         params = {}
 
-        for key in target_keys:
+        for key in global_weights:
 
-            if key in trainable_keys:
-                delta = -1 * (state_dict[key] - global_weights[key].cpu()) / lr
-                params[key] = delta
+            # only LoRA params
+            if "lora_" not in key:
+                continue
+
+            if key in grad_accumulator:
+
+                grad = grad_accumulator[key] / max(num_batches, 1)
+
+                if torch.isnan(grad).any() or torch.isinf(grad).any():
+                    print(f"[WARNING] Invalid gradient for {key}, zeroing")
+                    grad = torch.zeros_like(grad)
+
             else:
-                params[key] = torch.zeros_like(global_weights[key]).cpu()
+                # 🔥 KEY FIX: missing key → zero tensor
+                grad = torch.zeros_like(global_weights[key])
+
+            params[key] = grad.cpu()
 
         # ==========================================================
-        # Gradient attack
+        # DEBUG
         # ==========================================================
-        if is_under_attack and self.attack_type in self.ATTACK_ON_GRADIENT:
-            print(f"[Client {self.client_id}] Gradient attack applied", flush=True)
-            params = self.attack_func(grads=params, **self.attack_args)
+        if len(params) == 0:
+            print(f"[ERROR] Client {self.client_id} produced EMPTY gradients!")
+        else:
+            print(f"[Client {self.client_id}] DEBUG gradient norms:")
+            for k, v in params.items():
+                print(f"{k}: {torch.norm(v).item():.6f}")
+                break
 
-        del optimizer
         torch.cuda.empty_cache()
 
         print(f"[Client {self.client_id}] Finished local_update", flush=True)

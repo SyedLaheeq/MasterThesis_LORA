@@ -2,10 +2,10 @@
 #SBATCH -A NAISS2026-4-376      # Updated to your active 2026 project
 #SBATCH -p alvis                 # Partition
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=A100:1   # Request 1 A100 (40GB)
+#SBATCH --gpus-per-node=V100:1   # Request 1 A100 (40GB)
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8        # Gives you ~54GB RAM
-#SBATCH -t 08:00:00              # 8 hours
+#SBATCH -t 01:00:00              # 8 hours
 #SBATCH -J RoLoRA_Llama3
 #SBATCH -o logs/%j.log
 #SBATCH -e logs/%j.log
@@ -20,7 +20,7 @@ source /mimer/NOBACKUP/groups/naiss2025-22-260/laheeq/venv_alvis/bin/activate
 # 3. Set Environment Variables
 export HF_HOME=/mimer/NOBACKUP/groups/naiss2025-22-260/laheeq/.cache
 export WANDB_API_KEY="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"
-export HF_TOKEN="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"
+export HF_TOKEN="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"
 export HUGGING_FACE_HUB_TOKEN=$HF_TOKEN
 
 # Ensure logs directory exists

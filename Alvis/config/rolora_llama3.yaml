@@ -5,7 +5,9 @@ training_config:
   aggregate_type: "sparse"   # This keeps your Iteration 2 FedLAW defense active
   num_clients: 6           # Keep this low for Llama-3 to avoid OOM
   fraction_malicious: 0.2
+  q_factor: 1.0
   total_epochs: 5 # CHANGE BACK TO 5
+  malicious_type: "random"  # Random noise attack for simplicity; can be changed to "group_oriented"
   evaluate_each_epoch: 1
   device: "cuda"
   batch_size: 1              # Llama-3 8B is heavy; start with 1 and increase if VRAM allows
@@ -26,4 +28,4 @@ training_config:
   attack_args:
     attack_type: inverse_gradient
     attack_epoch: 0
-    scale: 1.0
+    scale: 5.0
