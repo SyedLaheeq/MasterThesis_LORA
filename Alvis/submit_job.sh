@@ -17,11 +17,11 @@ module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 # 2. Activate your Virtual Environment
 source /mimer/NOBACKUP/groups/naiss2025-22-260/laheeq/venv_alvis/bin/activate
 
-# 3. Set Environment Variables
-export HF_HOME=/mimer/NOBACKUP/groups/naiss2025-22-260/laheeq/.cache
-export WANDB_API_KEY="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"
-export HF_TOKEN="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"
-export HUGGING_FACE_HUB_TOKEN=$HF_TOKEN
+# # 3. Set Environment Variables
+# export HF_HOME=/mimer/NOBACKUP/groups/naiss2025-22-260/laheeq/.cache
+# export WANDB_API_KEY="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"
+# export HF_TOKEN="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"
+# export HUGGING_FACE_HUB_TOKEN=$HF_TOKEN
 
 # Ensure logs directory exists
 mkdir -p logs
