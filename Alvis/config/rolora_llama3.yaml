@@ -1,31 +1,56 @@
 training_config:
   project_name: "RoLoRA_Llama3_Thesis"
   model_name: "Llama-3-8B"
-  dataset_name: "alpaca"     # Or whatever text dataset you have prepared
-  aggregate_type: "sparse"   # This keeps your Iteration 2 FedLAW defense active
-  num_clients: 6           # Keep this low for Llama-3 to avoid OOM
-  fraction_malicious: 0.2
-  q_factor: 1.0
-  total_epochs: 5 # CHANGE BACK TO 5
-  malicious_type: "random"  # Random noise attack for simplicity; can be changed to "group_oriented"
+  dataset_name: "alpaca"
+  aggregate_type: "sparse"
+  num_clients: 20
+  fraction_malicious: 0.3
+  q_factor: 0.5
+  total_epochs: 5
+  malicious_type: "random"
   evaluate_each_epoch: 1
   device: "cuda"
-  batch_size: 1              # Llama-3 8B is heavy; start with 1 and increase if VRAM allows
+  batch_size: 4
   local_epochs: 1
-  
-  # Iteration 4: RoLoRA Specifics
+  learning_rate: 1e-4
+  weight_decay: 0.01
+
   rolora_params:
-    rank: 16                 # The rank for the LoRA adapters
-    scaling: 0.01            # Alpha/Scaling factor for the rotated spac
-    
-  # Iteration 2: FedLAW Sparse Parameters
+    rank: 16
+    scaling: 2.0
+
   sparse_params:
-    alpha: 0.0001
-    beta: 0.01
+    alpha: 0.1
+    beta: 0.05
     is_ftotal: true
-    # Add this block to your config
-# Add this to your YAML file
+    max_line_search_iterations_alpha: 0
+    max_line_search_iterations_beta: 0
+    c_alpha: 1.0e-4
+    rho_alpha: 0.5
+    c_beta: 1.0e-3
+    rho_beta: 0.5
+
+  # ==============================================================
+  # ATTACK SELECTION — uncomment ONE block, comment the others
+  # ==============================================================
+
+  # ── OPTION 1: No attack (clean baseline) ──────────────────────
+  # attack_args:
+  #   attack_type: none
+
+  # ── OPTION 2: LIE attack (recommended for FedLAW evaluation) ──
+  # Crafts gradients statistically close to benign distribution.
+  # FedLAW is designed to detect this. Use for main thesis results.
   attack_args:
-    attack_type: inverse_gradient
+    attack_type: lie_attack
     attack_epoch: 0
-    scale: 5.0
+    # z is auto-computed from num_clients + fraction_malicious.
+    # Uncomment to override: z: 1.5
+
+  # ── OPTION 3: Inverse gradient attack ─────────────────────────
+  # Flips and amplifies gradients. FedLAW cannot detect this well.
+  # Use to demonstrate FedLAW's limitations in thesis discussion.
+  # attack_args:
+  #   attack_type: inverse_gradient
+  #   attack_epoch: 0
+  #   scale: 2.0

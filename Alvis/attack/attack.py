@@ -11,98 +11,82 @@ class Attack:
     def __init__(self, attack_args):
 
         self.attack_args = attack_args if attack_args is not None else {}
-
-        attack_type = self.attack_args.get('attack_type', None)
+        attack_type      = self.attack_args.get('attack_type', None)
         self.attack_type = attack_type
 
-        # -------------------------------
-        # Attack mapping
-        # -------------------------------
         self.attack_map = {
-
-            # Data attacks
-            'flip_labels': self.flip_labels,
-            'backdoor': self.backdoor,
-
-            # Parameter attacks
-            'random_parameters': self.random_parameters,
-
-            # Gradient attacks
-            'boost_gradient': self.boost_gradient,
-            'lie_attack': self.lie_attack,
-
-            # 🔥 NEW
-            'inverse_gradient': self.inverse_gradient_attack,
+            'flip_labels':        self.flip_labels,
+            'backdoor':           self.backdoor,
+            'random_parameters':  self.random_parameters,
+            'boost_gradient':     self.boost_gradient,
+            'lie_attack':         self.lie_attack,
+            'inverse_gradient':   self.inverse_gradient_attack,
         }
 
         if attack_type is None or attack_type == "none":
             self.func = self.no_attack
-
         elif attack_type in self.attack_map:
             self.func = self.attack_map[attack_type]
-
         else:
             raise Exception(f"Attack type '{attack_type}' is invalid.")
 
-    # -------------------------------
-    # CALL
-    # -------------------------------
-    def __call__(self, **kwargs):
-        return self.func(**kwargs)
-
-    # -------------------------------
-    # DEFAULT (no attack)
-    # -------------------------------
     def __call__(self, *args, **kwargs):
         return self.func(*args, **kwargs, **self.attack_args)
-    
+
+    # ===================================================================
+    # DATA ATTACKS (applied during training, not here)
+    # ===================================================================
+
     def flip_labels(*args, **kwargs):
         return kwargs['data'], kwargs['max_label'] - kwargs['target']
 
     def backdoor(*args, **kwargs):
         backdoor_pattern = kwargs.get('backdoor_pattern', None)
-        backdoor_target = kwargs.get('backdoor_target', None)
+        backdoor_target  = kwargs.get('backdoor_target', None)
         if backdoor_pattern is None:
             raise ValueError("backdoor_pattern is required.")
-    
-        i, j, h, w, v = backdoor_pattern['i'], backdoor_pattern['j'], backdoor_pattern['h'], backdoor_pattern['w'], backdoor_pattern['v']
-        C = kwargs['data'] .shape[1]
-        
-        # Apply backdoor to the specified region
+
+        i, j, h, w, v = (backdoor_pattern['i'], backdoor_pattern['j'],
+                         backdoor_pattern['h'], backdoor_pattern['w'],
+                         backdoor_pattern['v'])
+        C = kwargs['data'].shape[1]
+
         if isinstance(v, (int, float)):
-            # Single value for all channels
-            kwargs['data'] [:, :, i:i+h, j:j+w] = v
+            kwargs['data'][:, :, i:i+h, j:j+w] = v
         elif isinstance(v, torch.Tensor) and v.shape == (C,):
-            # Channel-specific values
-            kwargs['data'] [:, :, i:i+h, j:j+w] = v.view(C, 1, 1)
+            kwargs['data'][:, :, i:i+h, j:j+w] = v.view(C, 1, 1)
         elif isinstance(v, list) and len(v) == C:
-            # Channel-specific values (list)
-            kwargs['data'] [:, :, i:i+h, j:j+w] = torch.tensor(v, device=device).view(C, 1, 1)
+            kwargs['data'][:, :, i:i+h, j:j+w] = torch.tensor(v, device=device).view(C, 1, 1)
         else:
-            raise ValueError("Invalid value for 'v'. Must be an int, float, or a tensor of shape [C].")
-        
+            raise ValueError("Invalid value for 'v'.")
+
         if backdoor_target is not None:
             if backdoor_target == "random":
-                kwargs['target'] = torch.randint(kwargs.get('min_label', 0), kwargs['max_label'], size=kwargs['target'].size(), device=device)
+                kwargs['target'] = torch.randint(
+                    kwargs.get('min_label', 0), kwargs['max_label'],
+                    size=kwargs['target'].size(), device=device
+                )
             else:
                 kwargs['target'].fill_(backdoor_target)
 
-        return kwargs['data'], kwargs['target'] # Number of channels (1 for MNIST, 3 for CIFAR)
+        return kwargs['data'], kwargs['target']
 
-    # Attack on Parameters
+    # ===================================================================
+    # PARAMETER ATTACK
+    # ===================================================================
+
     def random_parameters(*args, **kwargs):
-        mean_factor = kwargs.get('random_parameters_mean', 0)
-        std_factor = kwargs.get('random_parameters_std', 2)
+        mean_factor  = kwargs.get('random_parameters_mean', 0)
+        std_factor   = kwargs.get('random_parameters_std', 2)
         global_weights = kwargs['global_weights']
-        
-        # Filter: Only attack LoRA weights to save memory and be precise
-        lora_weights = {k: v for k, v in global_weights.items() if 'lora_' in k}
-        target_dict = lora_weights if len(lora_weights) > 0 else global_weights
 
-        original_shapes = {name: param.shape for name, param in target_dict.items()}
+        lora_weights = {k: v for k, v in global_weights.items() if 'lora_' in k}
+        target_dict  = lora_weights if len(lora_weights) > 0 else global_weights
+
+        original_shapes     = {name: param.shape for name, param in target_dict.items()}
         concatenated_weights = torch.cat([param.view(-1) for param in target_dict.values()]).to(device)
 
-        std_concat = torch.std(concatenated_weights)
+        std_concat  = torch.std(concatenated_weights)
         mean_concat = torch.mean(concatenated_weights)
 
         additive_noise = torch.normal(
@@ -113,117 +97,115 @@ class Attack:
         )
         noisy_weights = concatenated_weights + additive_noise
 
-        split_sizes = [param.numel() for param in target_dict.values()]
+        split_sizes   = [param.numel() for param in target_dict.values()]
         split_tensors = torch.split(noisy_weights, split_sizes)
 
-        # Reconstruct the dict
         attacked_weights = global_weights.copy()
         for i, (name, shape) in enumerate(original_shapes.items()):
             attacked_weights[name] = split_tensors[i].view(shape).to(device)
 
         return attacked_weights
 
-    # Attack on Gradient
+    # ===================================================================
+    # GRADIENT ATTACKS
+    # ===================================================================
+
     def boost_gradient(*args, **kwargs):
         return [kwargs['boost_factor'] * grad for grad in kwargs['grads']]
 
-
-    def inverse_gradient_attack(self, grads, clients=None, scale=1.0, **kwargs):
-
+    def inverse_gradient_attack(self, grads, clients=None, scale=10.0, **kwargs):
         attacked = []
-
         for g, client in zip(grads, clients):
-
-            # ONLY attack malicious clients
             if client.malicious:
-                new_g = {}
-                for k in g:
-                    new_g[k] = -scale * g[k]
-
-                    if torch.norm(new_g[k]) < 1e-3:
-                        new_g[k] = new_g[k] * 10  # reduce explosion
+                new_g = {k: -scale * g[k] + 0.01 * torch.sign(g[k]) for k in g}
                 attacked.append(new_g)
             else:
                 attacked.append(g)
-
         return attacked
-    
-    def no_attack(grads, clients, **kwargs):
+
+    def no_attack(self, grads, clients=None, **kwargs):
         return grads
 
+    # ===================================================================
+    # LIE ATTACK — fixed for dict-based LoRA gradients
+    # ===================================================================
+    def lie_attack(self, grads, clients, losses=None, z=None, **kwargs):
+        """
+        A Little Is Enough (Baruch et al. 2019).
 
-    def get_attack_function(attack_type):
-        if attack_type == "inverse_gradient":
-            return inverse_gradient_attack
-        else:
-            return no_attack
-    def lie_attack(*args, **kwargs):
-        clients = kwargs['clients']
-        clients_grads = kwargs['grads']
-        clients_losses = kwargs.get('losses', None)
+        Crafts malicious gradients that are statistically indistinguishable
+        from the benign distribution — staying within z standard deviations
+        of the benign mean to evade detection.
+
+        Works with dict-based gradients (LoRA key → tensor).
+        """
         num_clients = len(clients)
 
-        clients_params = [clients_grads, clients_losses]
+        # ------------------------------------------------------------------
+        # 1. Separate benign gradients and losses
+        # ------------------------------------------------------------------
+        benign_grads  = [grads[i]  for i, c in enumerate(clients) if not c.malicious]
+        benign_losses = [losses[i] for i, c in enumerate(clients) if not c.malicious] \
+                        if losses is not None else None
 
-        malicious_gradients = [
-            clients_grads[i]
-            for i, client in enumerate(clients) if not client.malicious
-        ]
+        if len(benign_grads) == 0:
+            print("[LIE] No benign clients found — returning original grads")
+            return grads
 
-        malicious_losses = None
-        if clients_losses is not None:
-            malicious_losses = [
-                clients_losses[i]
-                for i, client in enumerate(clients) if not client.malicious
-            ]
+        # ------------------------------------------------------------------
+        # 2. Compute z (how many std devs to shift)
+        #    Default: derived from the number of malicious clients
+        # ------------------------------------------------------------------
+        if z is None:
+            num_malicious = sum(1 for c in clients if c.malicious)
+            s         = num_clients // 2 + 1 + num_malicious
+            phi_value = (num_clients - s) / num_clients
+            # clamp phi so ppf doesn't blow up
+            phi_value = float(np.clip(phi_value, 1e-6, 1 - 1e-6))
+            z = norm.ppf(phi_value)
+        z = abs(z)
 
-        malicious_params = [malicious_gradients, malicious_losses]
+        print(f"[LIE] z = {z:.4f} | benign clients = {len(benign_grads)} | "
+              f"malicious clients = {num_clients - len(benign_grads)}")
 
-        s = num_clients // 2 + 1 + num_clients - len(malicious_gradients)
-        phi_value = (num_clients - s) / num_clients
-        z_default = norm.ppf(phi_value)
+        # ------------------------------------------------------------------
+        # 3. Compute mean + std over benign gradients for each LoRA key
+        # ------------------------------------------------------------------
+        lora_keys = sorted(benign_grads[0].keys())
 
-        z = kwargs.get("z", z_default)
+        crafted_grad = {}
+        for key in lora_keys:
+            # Stack benign tensors: shape (num_benign, *param_shape)
+            stacked = torch.stack([g[key].float() for g in benign_grads], dim=0)
+            mean_t  = stacked.mean(dim=0)
+            std_t   = stacked.std(dim=0)
 
-        # Initialize dictionary to store crafted malicious gradient
-        if isinstance(clients_grads[0], dict):
-            for_list = clients_grads[0].keys()
-            attacked_grad = {}
-            attacked_losses = [[]] * len(clients_grads[0])
-            attacked_params = [attacked_grad, attacked_losses]
-            sign_z = 1
-        else:
-            for_list = range(len(clients_grads[0]))
-            attacked_grad = [[]] * len(clients_grads[0])
-            attacked_losses = [[]] * len(clients_grads[0])
-            attacked_params = [attacked_grad, attacked_losses]
-            sign_z = 1
+            # LIE: shift mean by z * std toward making aggregation worse
+            # sign=+1 pushes in the direction that degrades the model most
+            crafted_grad[key] = (mean_t + z * std_t).to(benign_grads[0][key].dtype)
 
-        # Stack tensors for each key in the gradient dictionaries
-        for k, malicious in enumerate(malicious_params):
-            if malicious is not None:
-                if isinstance(malicious[0], float):
-                    mean_list = np.mean(malicious, axis=0)
-                    std_list = np.std(malicious, axis=0)
-                    attacked_params[k] = float(mean_list + sign_z * z * std_list)
-                else:
-                    for key in for_list:
-                        # Extract tensors for the current key from all malicious gradients
-                        stacked_tensors = torch.stack([grad[key].float() for grad in malicious])
-                        mean_tensor = torch.mean(stacked_tensors, dim=0)
-                        std_tensor = torch.std(stacked_tensors, dim=0)
+        # ------------------------------------------------------------------
+        # 4. Craft malicious loss (shift benign loss mean similarly)
+        # ------------------------------------------------------------------
+        crafted_loss = None
+        if benign_losses is not None:
+            mean_loss = float(np.mean(benign_losses))
+            std_loss  = float(np.std(benign_losses))
+            crafted_loss = mean_loss + z * std_loss
 
-                        # Craft the malicious gradient for the current key
-                        attacked_params[k][key] = mean_tensor + sign_z * z * std_tensor
+        # ------------------------------------------------------------------
+        # 5. Replace malicious client gradients + losses
+        # ------------------------------------------------------------------
+        attacked_grads  = list(grads)
+        attacked_losses = list(losses) if losses is not None else None
 
-        # Replace gradients for malicious clients
         for i, client in enumerate(clients):
             if client.malicious:
-                for j, param in enumerate(clients_params):
-                    if param is not None:
-                        param[i] = attacked_params[j]
+                attacked_grads[i] = crafted_grad
+                if attacked_losses is not None and crafted_loss is not None:
+                    attacked_losses[i] = crafted_loss
 
-        return clients_params
+        if attacked_losses is not None:
+            return attacked_grads, attacked_losses
 
-    def __call__(self, *args, **kwargs):
-        return self.func(*args, **kwargs)
+        return attacked_grads
